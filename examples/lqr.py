@@ -2,14 +2,15 @@
 
 State x = [position, velocity], input u = [acceleration]. The system starts
 at rest at position zero and tracks position one with zero velocity.
+The example solves both callback interfaces and checks exact equality.
 """
 
 import numpy as np
 
-from cyfatrop import Solver
+from cyfatrop import OcpAbstract, Solver, TrajOptAbstract
 
 
-class DoubleIntegrator:
+class DoubleIntegrator(OcpAbstract):
     def __init__(self, horizon=41, dt=0.1):
         self.horizon = horizon
         self.dt = dt
@@ -22,7 +23,6 @@ class DoubleIntegrator:
         self.control_weight = 0.01
         self.max_acceleration = 1.
 
-    # Stage-dependent dimensions allow an equality only at the initial stage.
     def get_horizon_length(self): return self.horizon
     def get_nx(self, k): return 2
     def get_nu(self, k): return 1 if k < self.horizon - 1 else 0
@@ -33,14 +33,12 @@ class DoubleIntegrator:
         return np.vstack([self.B.T, self.A.T])
 
     def eval_b(self, x_next, u, x, k):
-        # p_next = p + dt*v + 0.5*dt**2*a; v_next = v + dt*a.
-        return self.A @ x + self.B @ u - x_next
+        return self._dynamics(u, x) - x_next
 
     def _state_weight(self, k):
         return self.Q_terminal if k == self.horizon - 1 else self.Q
 
     def eval_RSQt(self, scale, u, x, lam_dyn, lam_eq, lam_ineq, k):
-        # All constraints are linear, so only the quadratic cost contributes.
         n = self.get_nu(k)
         hessian = np.zeros((n + 2, n + 2))
         hessian[:n, :n] = self.control_weight * np.eye(n)
@@ -61,16 +59,26 @@ class DoubleIntegrator:
 
     def eval_gineq(self, u, x, k): return u.copy()
 
-    def eval_L(self, scale, u, x, k):
+    def _dynamics(self, u, x):
+        return (np.einsum("ij,...j->...i", self.A, x)
+                + np.einsum("ij,...j->...i", self.B, u))
+
+    def _objective(self, scale, u, x, weight):
         error = x - self.target
-        return float(scale * 0.5 * (
-            self.control_weight * (u @ u) + error @ self._state_weight(k) @ error
-        ))
+        return scale * .5 * (
+            self.control_weight * np.sum(u * u, axis=-1)
+            + np.einsum("...i,...ij,...j->...", error, weight, error)
+        )
+
+    def _objective_gradient(self, scale, u, x, weight):
+        state_gradient = np.einsum("...ij,...j->...i", weight, x - self.target)
+        return scale * np.concatenate([self.control_weight * u, state_gradient], axis=-1)
+
+    def eval_L(self, scale, u, x, k):
+        return float(self._objective(scale, u, x, self._state_weight(k)))
 
     def eval_rq(self, scale, u, x, k):
-        return scale * np.concatenate([
-            self.control_weight * u, self._state_weight(k) @ (x - self.target)
-        ])
+        return self._objective_gradient(scale, u, x, self._state_weight(k))
 
     def get_bounds(self, k):
         n = self.get_ng_ineq(k)
@@ -80,12 +88,76 @@ class DoubleIntegrator:
     def get_initial_uk(self, k): return np.zeros(self.get_nu(k))
 
 
+class DoubleIntegrator2(TrajOptAbstract):
+    def __init__(self, horizon=41, dt=0.1):
+        self.model = DoubleIntegrator(horizon, dt)
+
+    def get_horizon_length(self): return self.model.horizon
+    def get_nx(self): return 2
+    def get_nu(self): return 1
+    def get_ng(self): return 0
+    def get_ng_ineq(self): return 1
+    def get_ng_ineq_terminal(self): return 0
+
+    def _weights(self):
+        weights = np.broadcast_to(self.model.Q, (self.model.horizon, 2, 2)).copy()
+        weights[-1] = self.model.Q_terminal
+        return weights
+
+    def batched_eval_BAt(self, x_next, u, x):
+        return np.broadcast_to(np.vstack([self.model.B.T, self.model.A.T]), (len(x), 3, 2))
+
+    def batched_eval_b(self, x_next, u, x):
+        return self.model._dynamics(u, x) - x_next
+
+    def batched_eval_RSQt(self, scale, u, x, lam_dyn, lam_eq, lam_ineq, lam_initial):
+        # Dynamics, ordinary constraints, and the initial condition are linear.
+        result = np.zeros((len(x), 3, 3))
+        result[:, 0, 0] = scale * self.model.control_weight
+        result[:, 1:, 1:] = scale * self._weights()
+        return result
+
+    def batched_eval_Gt(self, u, x): return np.empty((len(x), 3, 0))
+    def batched_eval_g(self, u, x): return np.empty((len(x), 0))
+
+    def batched_eval_Gt_ineq(self, u, x):
+        return np.broadcast_to(np.array([[1.], [0.], [0.]]), (len(x), 3, 1))
+
+    def batched_eval_gineq(self, u, x): return u.copy()
+
+    def batched_eval_rq(self, scale, u, x):
+        return self.model._objective_gradient(scale, u, x, self._weights())
+
+    def batched_eval_L(self, scale, u, x):
+        return self.model._objective(scale, u, x, self._weights())
+
+    def batched_get_bounds(self):
+        limit = np.full((self.model.horizon, 1), self.model.max_acceleration)
+        return -limit, limit
+
+    def batched_get_initial_xk(self):
+        return np.broadcast_to(self.model.initial_state, (self.model.horizon, 2))
+
+    def batched_get_initial_uk(self): return np.zeros((self.model.horizon, 1))
+    def eval_g_initial(self, x0): return x0 - self.model.initial_state
+    def eval_Gt_initial(self, x0): return np.eye(2)
+
+
 if __name__ == "__main__":
     problem = DoubleIntegrator()
-    result = Solver(problem, {"tolerance": 1e-9}).solve()
-    if not result.success:
-        raise RuntimeError(f"Fatrop failed: {result.status}")
-    print(result.status, "objective:", result.objective)
+    problem2 = DoubleIntegrator2(problem.horizon, problem.dt)
+
+    options = {"tolerance": 1e-9, "print_level": 0, "suppress_banner": True}
+    result = Solver(problem, options).solve()
+    result2 = Solver(problem2, options).solve()
+
+    if not result.success or not result2.success:
+        raise RuntimeError(f"Fatrop failed: {result.status}, {result2.status}")
+
+    np.testing.assert_allclose(np.stack(result.x), result2.x)
+    np.testing.assert_allclose(np.stack(result.u[:-1]), result2.u)
+    np.testing.assert_allclose(result.objective, result2.objective)
+
     print(" time   position   velocity   acceleration")
     for k, (x, u) in enumerate(zip(result.x, result.u)):
         acceleration = f"{u[0]:12.5f}" if len(u) else "           -"
