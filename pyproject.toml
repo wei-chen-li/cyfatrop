@@ -1,0 +1,40 @@
+[build-system]
+requires = ["scikit-build-core>=0.12,<1", "nanobind>=2.15,<3"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cyfatrop"
+version = "0.1.0"
+description = "NumPy callback interface to Fatrop, built with nanobind"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BSD-2-Clause"
+dependencies = ["numpy>=1.23"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: C++",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "build"]
+
+[tool.scikit-build]
+cmake.version = ">=3.19"
+wheel.packages = ["src/cyfatrop"]
+sdist.include = [
+  "/pyproject.toml", "/CMakeLists.txt", "/README.md",
+  "/cpp/*.cpp", "/src/cyfatrop/*.py",
+  "/src/cyfatrop/*.pyi", "/src/cyfatrop/py.typed", "/tests/*.py", "/examples/*.py",
+  "/.github/workflows/test.yml", "/.gitignore",
+]
+sdist.exclude = ["*"]
+build.tool-args = ["-j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

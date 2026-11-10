@@ -1,0 +1,25 @@
+name: Build and test
+on: [push, pull_request]
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install build pytest
+      # build creates an sdist, then builds the wheel from that sdist in isolation.
+      - run: python -m build
+      - run: python -m pip install dist/*.whl
+      - run: python -m pytest -q
+      - run: python examples/lqr.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions-${{ matrix.python }}
+          path: dist/*
