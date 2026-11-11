@@ -1,10 +1,4 @@
 """Solver regression tests using concrete problems and the public Python API.
-
-After installing cyfatrop (including its native extension), run either:
-    python src/cyfatrop/_solver_tests.py
-    python -m cyfatrop._solver_tests
-
-Standard unittest arguments, such as -v or NumericalSolveTests, are supported.
 """
 
 import gc
@@ -1072,5 +1066,3 @@ class SolverLifecycleTests(unittest.TestCase):
         self.assertNotEqual(verbose, "")
 
 
-if __name__ == "__main__":
-    unittest.main()

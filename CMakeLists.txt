@@ -60,7 +60,7 @@ set_target_properties(cyfatrop_fatrop PROPERTIES
 add_library(cyfatrop_blasfeo STATIC IMPORTED)
 set_target_properties(cyfatrop_blasfeo PROPERTIES IMPORTED_LOCATION "${deps}/lib/libblasfeo.a")
 
-nanobind_add_module(_native cpp/bindings.cpp)
+nanobind_add_module(_native cyfatrop/cpp/bindings.cpp)
 target_compile_features(_native PRIVATE cxx_std_17)
 target_link_libraries(_native PRIVATE cyfatrop_fatrop cyfatrop_blasfeo ${CMAKE_DL_LIBS})
 if(UNIX)

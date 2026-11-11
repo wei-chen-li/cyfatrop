@@ -33,7 +33,7 @@ print(result.status, result.objective, result.stats)
 print(result.x, result.u)
 ```
 
-`problem` must inherit one of the public Python abstract classes in [abstract.py](src/cyfatrop/abstract.py):
+`problem` must inherit one of the public Python abstract classes in [abstract.py](cyfatrop/abstract.py):
 
 ```python
 from cyfatrop import OcpAbstract, TrajOptAbstract
@@ -53,7 +53,7 @@ Run it with `python examples/lqr.py`.
 ## Development
 
 ```sh
-pip install '.[test]'
-python src/cyfatrop/_solver_tests.py
+pip install -e '.[test]'
+python -m cyfatrop.tests
 python -m build
 ```

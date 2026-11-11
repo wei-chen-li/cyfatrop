@@ -26,11 +26,12 @@ test = ["build"]
 
 [tool.scikit-build]
 cmake.version = ">=3.19"
-wheel.packages = ["src/cyfatrop"]
+wheel.packages = ["cyfatrop"]
+wheel.exclude = ["cyfatrop/cpp/**"]
 sdist.include = [
   "/pyproject.toml", "/CMakeLists.txt", "/README.md",
-  "/cpp/*.cpp", "/src/cyfatrop/*.py",
-  "/src/cyfatrop/*.pyi", "/src/cyfatrop/py.typed", "/examples/*.py",
+  "/cyfatrop/cpp/*.cpp", "/cyfatrop/*.py", "/cyfatrop/tests/*.py",
+  "/cyfatrop/*.pyi", "/cyfatrop/py.typed", "/examples/*.py",
   "/.github/workflows/test.yml", "/.gitignore",
 ]
 sdist.exclude = ["*"]
