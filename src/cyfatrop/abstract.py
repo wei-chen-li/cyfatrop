@@ -148,6 +148,25 @@ class OcpAbstract(ABC):
         """Retract (nu,) control along (tu,) step; defaults to Euclidean addition."""
         return _euclidean_retraction(u, delta_u, alpha)
 
+    def intermediate(self, iteration: int, x: tuple[Array, ...], u: tuple[Array, ...],
+                     stats: dict[str, float]) -> None:
+        """Observe the current iterate before the next solver step; default no-op.
+
+        Iteration numbers start at zero. x and u use the same per-stage tuple
+        formats as Result.x and Result.u. Their arrays are immutable, owned
+        snapshots that may be retained after this call or the solve.
+
+        stats is a fresh dictionary containing Fatrop's iteration diagnostics:
+        objective, inf_pr (constraint violation infinity norm), inf_du (maximum
+        variable/slack dual infeasibility infinity norm), and mu (barrier
+        parameter). These are the quantities used by the native iteration log.
+
+        No final callback is added after termination; a solve that performs no
+        iterations makes no calls. Return values are ignored, so returning False
+        does not stop the solve. Exceptions propagate out of Solver.solve().
+        The callback is cached at solver construction, like numerical callbacks.
+        """
+
 
 class TrajOptAbstract(ABC):
     """Fixed-dimension problem with horizon-wide batch callbacks.
@@ -299,3 +318,22 @@ class TrajOptAbstract(ABC):
     @abstractmethod
     def eval_g_initial(self, x0: Array) -> Array:
         """Return the initial equality residual, shape (tx,)."""
+
+    def intermediate(self, iteration: int, x: Array, u: Array,
+                     stats: dict[str, float]) -> None:
+        """Observe the current iterate before the next solver step; default no-op.
+
+        Iteration numbers start at zero. x and u use the same stacked formats
+        as Result.x and Result.u: (K, nx) and (K-1, nu). Both are immutable,
+        owned snapshots that may be retained after this call or the solve.
+
+        stats is a fresh dictionary containing Fatrop's iteration diagnostics:
+        objective, inf_pr (constraint violation infinity norm), inf_du (maximum
+        variable/slack dual infeasibility infinity norm), and mu (barrier
+        parameter). These are the quantities used by the native iteration log.
+
+        No final callback is added after termination; a solve that performs no
+        iterations makes no calls. Return values are ignored, so returning False
+        does not stop the solve. Exceptions propagate out of Solver.solve().
+        The callback is cached at solver construction, like numerical callbacks.
+        """

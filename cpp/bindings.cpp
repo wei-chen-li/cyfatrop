@@ -4,6 +4,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <fatrop/fatrop.hpp>
+#include <fatrop/ip_algorithm/ip_data.hpp>
 #include <fatrop/ip_algorithm/ip_timings.hpp>
 #include <algorithm>
 #include <chrono>
@@ -78,6 +79,20 @@ public:
     Index get_nx_tangent(Index k) const override { return tx_[k]; }
     Index get_nu_tangent(Index k) const override { return tu_[k]; }
     Index get_horizon_length() const override { return static_cast<Index>(nx_.size()); }
+
+    void intermediate(const IpData<OcpType> &data) {
+        // Fatrop passes const data, but its diagnostic getters lazily fill caches
+        // on the actual mutable iterate, as they do for native iteration output.
+        auto &iterate = const_cast<IpIterate<OcpType> &>(data.current_iterate());
+        nb::dict stats;
+        stats["objective"] = iterate.obj_value();
+        stats["inf_pr"] = norm_inf(iterate.constr_viol());
+        stats["inf_du"] = std::max(iterate.dual_infeasibility_x_inf(),
+                                   iterate.dual_infeasibility_s_inf());
+        stats["mu"] = iterate.mu();
+        problem.attr("_intermediate")(
+            data.iteration_number(), snapshot(&iterate.primal_x()), stats);
+    }
 
     template <typename MakeArgs>
     Array evaluate(const char *name, Index k, MakeArgs make_args) const {
@@ -230,6 +245,10 @@ class PythonNlp final : public NlpOcp {
 public:
     explicit PythonNlp(std::shared_ptr<PythonOcp> ocp) : NlpOcp(ocp), ocp_(std::move(ocp)) {}
 
+    void callback(const IpData<OcpType> &data) override {
+        ocp_->intermediate(data);
+    }
+
     Index eval_lag_hess(const Info &i, Scalar scale, const VecRealView &x, const VecRealView &s,
                        const VecRealView &lam, Hessian<OcpType> &out) override {
         BatchScope scope(*ocp_, {"eval_RSQt"}, &x, &lam, scale);
@@ -306,7 +325,20 @@ public:
         : ocp_(std::make_shared<PythonOcp>(std::move(problem))),
           nlp_(std::make_shared<PythonNlp>(ocp_)), options_(std::move(options)) {}
 
+    int traverse(visitproc visit, void *arg) const {
+        if (ocp_) Py_VISIT(ocp_->problem.ptr());
+        Py_VISIT(options_.ptr());
+        return 0;
+    }
+
+    void clear() {
+        nlp_.reset();
+        ocp_.reset();
+        options_.reset();
+    }
+
     nb::dict solve() {
+        if (!nlp_) throw std::runtime_error("Native solver has been garbage-collected");
         // Build lazily: inspecting a problem never invokes numerical callbacks.
         // Fresh algorithm state also makes retrying after callback exceptions safe.
         OptionRegistry registry;
@@ -343,6 +375,25 @@ private:
     std::shared_ptr<PythonNlp> nlp_;
     nb::dict options_;
 };
+
+// Callbacks can capture their Solver. Expose native-held Python references so
+// Python can discover and collect cycles crossing the language boundary.
+int native_solver_traverse(PyObject *self, visitproc visit, void *arg) {
+    Py_VISIT(Py_TYPE(self));
+    if (!nb::inst_ready(self)) return 0;
+    return nb::inst_ptr<NativeSolver>(self)->traverse(visit, arg);
+}
+
+int native_solver_clear(PyObject *self) {
+    if (nb::inst_ready(self)) nb::inst_ptr<NativeSolver>(self)->clear();
+    return 0;
+}
+
+PyType_Slot native_solver_slots[] = {
+    {Py_tp_traverse, reinterpret_cast<void *>(native_solver_traverse)},
+    {Py_tp_clear, reinterpret_cast<void *>(native_solver_clear)},
+    {0, nullptr}
+};
 } // namespace
 
 NB_MODULE(_native, m) {
@@ -358,7 +409,7 @@ NB_MODULE(_native, m) {
         .value("LineSearchFailed", IpSolverReturnFlag::LineSearchFailed)
         .value("ErrorInStepComputation", IpSolverReturnFlag::ErrorInStepComputation)
         .value("Unknown", IpSolverReturnFlag::Unknown);
-    nb::class_<NativeSolver>(m, "NativeSolver")
+    nb::class_<NativeSolver>(m, "NativeSolver", nb::type_slots(native_solver_slots))
         .def(nb::init<nb::object, nb::dict>())
         .def("solve", &NativeSolver::solve);
 }

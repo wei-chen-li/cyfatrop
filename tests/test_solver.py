@@ -1,5 +1,6 @@
 import gc
 import inspect
+import weakref
 from collections import Counter
 
 import numpy as np
@@ -730,3 +731,221 @@ def test_varying_dimensions_and_rectangular_jacobians():
     z = np.linalg.solve(residual_map.T @ residual_map, residual_map.T @ target)
     for actual, mapping in zip(result.x, [map_x0, map_x1, map_x2]):
         np.testing.assert_allclose(actual, mapping @ z, atol=1e-7)
+
+
+@pytest.mark.parametrize("cls", [
+    StageIntegrator, FixedIntegrator, VaryingOcp, StageCircleIntegrator,
+    CircleIntegrator, CircleControlIntegrator, NonlinearInitial,
+])
+def test_intermediate_snapshots_and_solution(monkeypatch, cls):
+    baseline = Solver(cls(), OPTIONS).solve()
+    problem = cls()
+    events = []
+    retained = []
+    dispatches = []
+    original = _Problem._intermediate
+
+    def dispatch(self, iteration, primal, stats):
+        dispatches.append(iteration)
+        return original(self, iteration, primal, stats)
+
+    monkeypatch.setattr(_Problem, "_intermediate", dispatch)
+
+    def intermediate(iteration, x, u, stats):
+        assert isinstance(iteration, int) and iteration == len(events)
+        if isinstance(problem, OcpAbstract):
+            assert isinstance(x, tuple) and isinstance(u, tuple)
+            assert [a.shape for a in x] == [(problem.get_nx(k),) for k in range(len(x))]
+            assert [a.shape for a in u] == [(problem.get_nu(k),) for k in range(len(u))]
+        else:
+            assert x.shape == (problem.get_horizon_length(), problem.get_nx())
+            assert u.shape == (problem.get_horizon_length() - 1, problem.get_nu())
+        for trajectory in (x, u):
+            blocks = (trajectory,) if isinstance(trajectory, np.ndarray) else trajectory
+            for block in blocks:
+                assert block.flags.owndata and not block.flags.writeable
+                if block.size:
+                    with pytest.raises(ValueError, match="read-only"):
+                        block.flat[0] = 99.
+                retained.append((block, block.copy()))
+        assert set(stats) == {"objective", "inf_pr", "inf_du", "mu"}
+        assert all(isinstance(v, float) and np.isfinite(v) for v in stats.values())
+        assert stats["inf_pr"] >= 0 and stats["inf_du"] >= 0 and stats["mu"] > 0
+        events.append((iteration, x, u, stats, stats.copy()))
+
+    problem.intermediate = intermediate
+    solver = Solver(problem, OPTIONS)
+    assert events == []
+    result = solver.solve()
+    assert result.success and baseline.success
+    assert len(events) == result.stats["iterations"] > 0
+    assert dispatches == list(range(result.stats["iterations"]))
+    assert len({id(event[3]) for event in events}) == len(events)
+    assert result.objective == baseline.objective
+    for actual, expected in ((result.x, baseline.x), (result.u, baseline.u)):
+        assert type(actual) is type(expected)
+        if isinstance(actual, tuple):
+            assert len(actual) == len(expected)
+            for a, b in zip(actual, expected):
+                np.testing.assert_array_equal(a, b)
+        else:
+            np.testing.assert_array_equal(actual, expected)
+    # Snapshot arrays and metrics survive subsequent native solver reuse.
+    first_events = events.copy()
+    events.clear()
+    second = solver.solve()
+    assert second.success
+    gc.collect()
+    for block, saved in retained:
+        np.testing.assert_array_equal(block, saved)
+    for _, _, _, stats, saved in first_events + events:
+        assert stats == saved
+
+
+@pytest.mark.parametrize("cls", [StageIntegrator, FixedIntegrator])
+def test_intermediate_metrics_match_native_output(capfd, cls):
+    problem = cls()
+    events = []
+
+    def intermediate(iteration, x, u, stats):
+        states = np.stack(x).ravel()
+        controls = np.concatenate(u) if isinstance(u, tuple) else u.ravel()
+        objective = .5 * (controls @ controls + np.sum((states - problem.target) ** 2))
+        assert stats["objective"] == pytest.approx(objective, abs=1e-12)
+        events.append((iteration, stats))
+
+    problem.intermediate = intermediate
+    result = Solver(problem, {**OPTIONS, "print_level": 5}).solve()
+    lines = [line.split() for line in capfd.readouterr().out.splitlines()]
+    rows = [parts for parts in lines if parts and parts[0].isdigit()]
+    assert len(rows) == len(events) + 1
+    assert int(rows[-1][0]) == result.stats["iterations"]
+    for (iteration, stats), row in zip(events, rows):
+        assert int(row[0]) == iteration
+        assert stats["objective"] == pytest.approx(float(row[1]), rel=1e-8, abs=1e-12)
+        assert stats["inf_pr"] == pytest.approx(float(row[2]), rel=.006, abs=1e-30)
+        assert stats["inf_du"] == pytest.approx(float(row[3]), rel=.006, abs=1e-30)
+        assert np.log10(stats["mu"]) == pytest.approx(float(row[4]), abs=.051)
+
+
+@pytest.mark.parametrize("cls,adapter", [
+    (StageIntegrator, _OcpAbstractProblem),
+    (FixedIntegrator, _TrajOptAbstractProblem),
+])
+def test_default_intermediate_is_dispatched_every_iteration(monkeypatch, cls, adapter):
+    dispatches = []
+    original_intermediate = _Problem._intermediate
+
+    def intermediate(self, iteration, primal, stats):
+        dispatches.append(iteration)
+        return original_intermediate(self, iteration, primal, stats)
+
+    monkeypatch.setattr(_Problem, "_intermediate", intermediate)
+    original = adapter.trajectories
+    extractions = []
+
+    def trajectories(self, primal):
+        extractions.append(True)
+        return original(self, primal)
+
+    monkeypatch.setattr(adapter, "trajectories", trajectories)
+    solver = Solver(cls(), OPTIONS)
+    result = solver.solve()
+    assert result.success and result.stats["iterations"] > 0
+    assert dispatches == list(range(result.stats["iterations"]))
+    assert len(extractions) == result.stats["iterations"] + 1
+
+
+@pytest.mark.parametrize("cls", [StageIntegrator, FixedIntegrator])
+def test_intermediate_no_calls_for_zero_iterations(cls):
+    problem = cls()
+    problem.intermediate = lambda *args: pytest.fail("No solver steps should be taken")
+    result = Solver(problem, {**OPTIONS, "max_iter": 0}).solve()
+    assert result.status == Status.MaxIterExceeded and result.stats["iterations"] == 0
+
+
+@pytest.mark.parametrize("cls", [StageIntegrator, FixedIntegrator])
+def test_intermediate_exception_retry_and_replaced_callback(cls):
+    class IntermediateError(Exception): pass
+
+    problem = cls()
+    problem.fail = True
+    iterations = []
+
+    def intermediate(iteration, x, u, stats):
+        iterations.append(iteration)
+        if problem.fail:
+            raise IntermediateError("intermediate failed")
+
+    solver = Solver(problem, OPTIONS)
+    # The current intermediate method is resolved on each iteration.
+    problem.intermediate = intermediate
+    with pytest.raises(IntermediateError, match="intermediate failed"):
+        solver.solve()
+    assert iterations == [0]
+    problem.fail = False
+    iterations.clear()
+    result = solver.solve()
+    assert result.success and iterations == list(range(result.stats["iterations"]))
+
+
+@pytest.mark.parametrize("cls", [StageIntegrator, FixedIntegrator])
+def test_intermediate_recursive_solve_is_rejected(cls):
+    problem = cls()
+    problem.recurse = True
+
+    def intermediate(*args):
+        if problem.recurse:
+            solver.solve()
+
+    problem.intermediate = intermediate
+    solver = Solver(problem, OPTIONS)
+    with pytest.raises(RuntimeError, match="recursively"):
+        solver.solve()
+    problem.recurse = False
+    assert solver.solve().success
+
+
+@pytest.mark.parametrize("cls", [StageIntegrator, FixedIntegrator])
+def test_intermediate_return_values_and_stats_mutations_are_ignored(cls):
+    problem = cls()
+    calls = []
+
+    def intermediate(iteration, x, u, stats):
+        calls.append(iteration)
+        stats.clear()
+        return False
+
+    problem.intermediate = intermediate
+    result = Solver(problem, OPTIONS).solve()
+    assert result.success and len(calls) == result.stats["iterations"] > 1
+    assert result.objective == pytest.approx(2.375, abs=2e-6)
+
+
+@pytest.mark.parametrize("cls", [StageIntegrator, FixedIntegrator])
+def test_intermediate_solver_reference_cycle_is_collectable(cls):
+    def create_cycle():
+        problem = cls()
+        problem.intermediate = lambda *args: solver.dimensions
+        solver = Solver(problem, OPTIONS)
+        assert solver.solve().success
+        return [weakref.ref(obj) for obj in (problem, solver, solver._problem)]
+
+    refs = create_cycle()
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+@pytest.mark.parametrize("cls", [StageIntegrator, FixedIntegrator])
+def test_intermediate_override_inherited_by_subclass(cls):
+    class Observed(cls):
+        def intermediate(self, iteration, x, u, stats):
+            self.iterations.append(iteration)
+
+    class Child(Observed): pass
+
+    problem = Child()
+    problem.iterations = []
+    result = Solver(problem, OPTIONS).solve()
+    assert result.success
+    assert problem.iterations == list(range(result.stats["iterations"]))

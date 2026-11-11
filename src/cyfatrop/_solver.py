@@ -83,6 +83,17 @@ class _Problem(ABC):
     def trajectories(self, primal):
         """Extract owned state and control trajectories for the public Result."""
 
+    def _intermediate(self, iteration, primal, stats):
+        """Convert the native iterate to immutable trajectories and notify the user."""
+        x, u = self.trajectories(primal)
+        for trajectory in (x, u):
+            if isinstance(trajectory, np.ndarray):
+                _readonly(trajectory)
+            else:
+                for stage in trajectory:
+                    _readonly(stage)
+        self.problem.intermediate(iteration, x, u, stats)
+
     def _build_layout(self):
         d = self.dimensions
         for k in range(self.K):
