@@ -1,31 +1,3 @@
-"""Public problem contracts for :class:`cyfatrop.Solver`.
-
-Subclass exactly one of OcpAbstract or TrajOptAbstract. The base class selects
-the internal adapter; inheriting both is unsupported. Python ABCs enforce
-implementation of abstract methods, including callbacks returning empty arrays.
-Signatures are not inspected and extra callbacks are ignored. Numerical
-dimensions, callback output shapes/types, and bounds are validated at runtime.
-
-Methods and dimensions are cached when constructing a solver. Construct a new
-solver after changing dimensions or replacing methods. Callback-owned problem
-data may change between solves. Dimensions must be nonnegative integers within
-Fatrop's 32-bit index range; the horizon must be at least one and total problem
-dimensions must also fit that range.
-
-Callback array inputs are immutable snapshots that can safely be retained.
-Return real numeric NumPy arrays of the documented shapes. Integer and strided
-arrays are copied to contiguous float64 storage. Scalar stage objectives may
-also be Python numbers. Active bounds must not contain NaN or have lower > upper.
-
-Primal sizes are nx and nu; tangent sizes are tx and tu. Derivatives use tangent
-variable ordering [u, x], with m = tu + tx. Tangent getters default to their
-corresponding primal sizes. Retractions default to value + alpha * delta and
-raise ValueError when primal and tangent lengths differ; manifold problems
-override them.
-"""
-
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -34,306 +6,372 @@ from numpy.typing import NDArray
 Array = NDArray[np.float64]
 
 
-def _euclidean_retraction(value: Array, delta: Array, alpha: float) -> Array:
-    if value.shape[-1] != delta.shape[-1]:
-        raise ValueError("A custom retraction is required when primal and tangent dimensions differ")
-    return value + alpha * delta
-
-
 class OcpAbstract(ABC):
-    """State-dependent OCP with stage index k on each callback.
+    """OCP with stage index k on each callback.
 
     Dimensions and callback shapes are those of stage k, including the terminal
-    stage. Inputs x and u have shapes (nx,) and (nu,), while x_next has the next
-    stage's primal state size. Let tx_next = get_nx_tangent(k + 1).
-
-    Supply actual dimensions at every stage; there is no padding or cropping.
-    In particular, get_nu(K - 1) may be zero or include terminal controls.
-    Express initial equalities through eval_g and eval_Gt at stage 0.
-
-    Result.x and Result.u are tuples of K owned arrays using actual stage sizes,
-    including an empty terminal control array when get_nu(K - 1) is zero.
+    stage. In particular, get_nu(K - 1) may be zero for terminal stage not
+    having controls.
     """
 
     @abstractmethod
     def get_horizon_length(self) -> int:
-        """Return the integer number of stages K (at least one).
-
-        There are K-1 dynamics transitions. Dynamics callbacks are not invoked
-        when K=1.
-        """
+        """Get the horizon length of the OCP."""
 
     @abstractmethod
     def get_nx(self, k: int) -> int:
-        """Return the primal state size at stage k."""
+        """Get the number of states for a given time step."""
 
     @abstractmethod
     def get_nu(self, k: int) -> int:
-        """Return the primal control size at stage k."""
+        """Get the number of inputs for a given time step."""
 
     @abstractmethod
     def get_ng(self, k: int) -> int:
-        """Return the equality count at stage k."""
+        """Get the number of equality constraints for a given time step."""
 
     @abstractmethod
     def get_ng_ineq(self, k: int) -> int:
-        """Return the inequality count at stage k."""
+        """Get the number of inequality constraints for a given time step."""
 
     def get_nx_tangent(self, k: int) -> int:
-        """Return tx; defaults to get_nx(k)."""
+        """Get the tangent-space dimension of the state at stage k."""
         return self.get_nx(k)
 
     def get_nu_tangent(self, k: int) -> int:
-        """Return tu; defaults to get_nu(k)."""
+        """Get the tangent-space dimension of the controls at stage k."""
         return self.get_nu(k)
 
     @abstractmethod
     def eval_BAt(self, x_next: Array, u: Array, x: Array, k: int) -> Array:
-        """Return the transposed dynamics Jacobian, shape (m, tx_next)."""
+        """Evaluate the tranposed dynamics Jacobian, shape (tu+tx, tx_next).
+
+        This method evaluates [Bₖ Aₖ]ᵀ from the linearized dynamics
+        δxₖ₊₁ = Aₖ δxₖ + Bₖ δuₖ + bₖ.
+        """
 
     @abstractmethod
     def eval_RSQt(self, scale: float, u: Array, x: Array, lam_dyn: Array,
                   lam_eq: Array, lam_ineq: Array, k: int) -> Array:
-        """Return the Lagrangian Hessian (m, m).
+        """Evaluate the Lagrangian Hessian, shape (tu+tx, tu+tx).
+
+        This method evaluates the Hessian of the Lagrangian to the
+        concatenation of (uₖ, xₖ).
 
         Multipliers have tx_next, ng, and ng_ineq entries, respectively.
-        lam_dyn is empty at the terminal stage. Scale weights the objective only.
+        lam_dyn is empty at the terminal stage. Scale weights the objective.
         """
 
     @abstractmethod
     def eval_Gt(self, u: Array, x: Array, k: int) -> Array:
-        """Return the transposed equality Jacobian, shape (m, ng)."""
+        """Evaluate the tranposed equality constraints Jacobian, shape (tu+tx, ng).
+
+        This method evaluates the Jacobian of the equality constraints
+        with respect to the concatenation of (uₖ, xₖ).
+        """
 
     @abstractmethod
     def eval_Gt_ineq(self, u: Array, x: Array, k: int) -> Array:
-        """Return the transposed inequality Jacobian, shape (m, ng_ineq)."""
+        """Evaluate the tranposed inequality constraints Jacobian, shape (tu+tx, ng_ineq).
+
+        This method evaluates the Jacobian of the inequality constraints
+        with respect to the concatenation of (uₖ, xₖ).
+        """
 
     @abstractmethod
     def eval_b(self, x_next: Array, u: Array, x: Array, k: int) -> Array:
-        """Return the dynamics residual, shape (tx_next,)."""
+        """Evaluate the dynamics constraint violation, shape (tx_next,).
+
+        This method evaluates bₖ = -xₖ₊₁ + fₖ(uₖ, xₖ), for Euclidean states.
+        For manifold states, express the residual in tangent coordinates.
+        """
 
     @abstractmethod
     def eval_g(self, u: Array, x: Array, k: int) -> Array:
-        """Return the equality residual, shape (ng,)."""
+        """Evaluate the equality constraint violation, shape (ng,)."""
 
     @abstractmethod
     def eval_gineq(self, u: Array, x: Array, k: int) -> Array:
-        """Return the inequality values, shape (ng_ineq,)."""
+        """Evaluate the inequality constraint violation, shape (ng_ineq,)."""
 
     @abstractmethod
     def eval_rq(self, scale: float, u: Array, x: Array, k: int) -> Array:
-        """Return the scaled objective gradient, shape (m,)."""
+        """Evaluate the scaled gradient of the objective function, shape (tu+tx,).
+
+        This method evaluates the gradient of the objective function (not the Lagrangian!)
+        with respect to the concatenation of (uₖ, xₖ).
+        """
 
     @abstractmethod
     def eval_L(self, scale: float, u: Array, x: Array, k: int) -> float:
-        """Return the scaled scalar stage objective."""
+        """Evaluate the scaled objective function value."""
 
     @abstractmethod
     def get_bounds(self, k: int) -> tuple[Array, Array]:
-        """Return lower and upper inequality bounds, each shape (ng_ineq,)."""
+        """Get the bounds of the inequalities at a given stage, 2-tuple of
+        shape (ng_ineq,)."""
 
     @abstractmethod
     def get_initial_xk(self, k: int) -> Array:
-        """Return the initial state guess, shape (nx,)."""
+        """Get the initial guess for the states of a given stage, shape (nx,)."""
 
     @abstractmethod
     def get_initial_uk(self, k: int) -> Array:
-        """Return the initial control guess, shape (nu,)."""
+        """Get the initial guess for the inputs of a given stage, shape (nu,)."""
 
     def apply_retraction_xk(self, x: Array, delta_x: Array, alpha: float, k: int) -> Array:
-        """Retract (nx,) state along (tx,) step; defaults to Euclidean addition."""
+        """Retract (nx,) state along (tx,) step at stage k."""
         return _euclidean_retraction(x, delta_x, alpha)
 
     def apply_retraction_uk(self, u: Array, delta_u: Array, alpha: float, k: int) -> Array:
-        """Retract (nu,) control along (tu,) step; defaults to Euclidean addition."""
+        """Retract (nu,) control along (tu,) step at stage k."""
         return _euclidean_retraction(u, delta_u, alpha)
 
     def intermediate(self, iteration: int, x: tuple[Array, ...], u: tuple[Array, ...],
                      stats: dict[str, float]) -> None:
-        """Observe the current iterate before the next solver step; default no-op.
-
-        Iteration numbers start at zero. x and u use the same per-stage tuple
-        formats as Result.x and Result.u. Their arrays are immutable, owned
-        snapshots that may be retained after this call or the solve.
-
-        stats is a fresh dictionary containing Fatrop's iteration diagnostics:
-        objective, inf_pr (constraint violation infinity norm), inf_du (maximum
-        variable/slack dual infeasibility infinity norm), and mu (barrier
-        parameter). These are the quantities used by the native iteration log.
-
-        No final callback is added after termination; a solve that performs no
-        iterations makes no calls. Return values are ignored, so returning False
-        does not stop the solve. Exceptions propagate out of Solver.solve().
-        The callback is cached at solver construction, like numerical callbacks.
-        """
+        """Observe the current iterate before the next solver step."""
 
 
 class TrajOptAbstract(ABC):
-    """Fixed-dimension problem with horizon-wide batch callbacks.
-
-    Implement batched callbacks; there is no per-stage fallback. Array inputs
-    and outputs have a leading batch axis in ascending stage order. Callbacks
-    for stage operations use K rows; dynamics callbacks use K-1 rows. Scale and
-    alpha remain scalars. State batches have shape (K, nx), control batches
-    (K, nu), and all callback arrays use nominal dimensions, including the
-    terminal row.
-
-    There are no native terminal control variables. Terminal control and control
-    step inputs are zero placeholders, as are terminal dynamics multipliers.
-    Inactive terminal ordinary equality and inequality multipliers are padded
-    with zeros. Terminal residuals and bounds retain active leading entries;
-    constraint Jacobians retain active leading columns and discard control rows.
-    Terminal Hessians retain their state-state blocks, and objective gradients
-    retain state entries. Terminal control initialization/retraction outputs
-    are discarded. Return complete nominal shapes even for discarded entries,
-    whose values may be arbitrary.
-
-    Initial callbacks receive x0 with shape (nx,). Initial equalities are
-    appended after ordinary stage-0 equalities; zero control rows are supplied
-    internally for their transposed Jacobian. get_ng() excludes these tx initial
-    constraints. Terminal count overrides and cropping apply before the append,
-    including when K=1. Solver.dimensions["ng"] reports native counts including
-    the initial block.
-
-    Result.x is a stacked array with shape (K, nx). Result.u contains the actual
-    controls with shape (K-1, nu); it has no padded terminal row. Callback padding
-    is separate from the returned trajectories.
-    """
+    """Trajectory optimization problem with horizon-wide batch callbacks."""
 
     @abstractmethod
     def get_horizon_length(self) -> int:
         """Return the integer number of stages K (at least one).
 
-        There are K-1 dynamics transitions. Dynamics callbacks are not invoked
-        when K=1.
+        There are K-1 dynamics transitions.
         """
 
     @abstractmethod
     def get_nx(self) -> int:
-        """Return the nominal primal state size."""
+        """Get the number of states."""
 
     @abstractmethod
     def get_nu(self) -> int:
-        """Return the nominal primal control size."""
+        """Get the number of input.s"""
 
     @abstractmethod
     def get_ng(self) -> int:
-        """Return the ordinary equality count, excluding initial constraints."""
+        """Get the number of equality constraints, excluding initial constraints.
+        Overidden by get_ng_terminal() for the terminal stage."""
 
     @abstractmethod
     def get_ng_ineq(self) -> int:
-        """Return the nominal inequality count."""
+        """Get the number of inequality constraints.
+        Overidden by get_ng_ineq_terminal() for the terminal stage."""
 
     def get_nx_tangent(self) -> int:
-        """Return tx; defaults to get_nx()."""
+        """Get the tangent-space dimension of the state."""
         return self.get_nx()
 
     def get_nu_tangent(self) -> int:
-        """Return tu; defaults to get_nu()."""
+        """Get the tangent-space dimension of the inputs."""
         return self.get_nu()
 
     def get_ng_terminal(self) -> int:
-        """Return the terminal ordinary equality count; defaults to get_ng().
-
-        Overrides may reduce this count, but cannot exceed get_ng().
-        """
+        """Get the number of terminal equality constraints, cannot exceed get_ng()."""
         return self.get_ng()
 
     def get_ng_ineq_terminal(self) -> int:
-        """Return the terminal inequality count; defaults to get_ng_ineq().
-
-        Overrides may reduce this count, but cannot exceed get_ng_ineq().
-        """
+        """Get the number of terminal inequality constraints, cannot exceed get_ng_ineq()."""
         return self.get_ng_ineq()
 
     @abstractmethod
     def batched_eval_BAt(self, x_next: Array, u: Array, x: Array) -> Array:
-        """Return transposed dynamics Jacobians, shape (K-1, m, tx)."""
+        """Evaluate the tranposed dynamics Jacobian, shape (K-1, tu+tx, tx).
+
+        This method evaluates in batch [Bₖ Aₖ]ᵀ from the linearized dynamics
+        δxₖ₊₁ = Aₖ δxₖ + Bₖ δuₖ + bₖ.
+
+        Argments:
+            x_next: shape (K-1, nx)
+            u: shape (K-1, nu)
+            x: shape (K-1, nx)
+        """
 
     @abstractmethod
     def batched_eval_RSQt(self, scale: float, u: Array, x: Array, lam_dyn: Array,
                           lam_eq: Array, lam_ineq: Array, lam_initial: Array) -> Array:
-        """Return Hessians (K, m, m), including initial curvature in row 0.
 
-        Multiplier shapes are (K, tx), (K, ng), (K, ng_ineq), and (tx,).
-        lam_eq contains only ordinary equalities; lam_initial contains only
-        the appended initial multipliers. Include their multiplier-weighted
-        constraint curvature in the stage-0 Hessian.
-        Terminal dynamics and inactive terminal entries are zero-padded.
-        Scale weights the objective only.
+        """Evaluate the Lagrangian Hessian, shape (K, tu+tx, tu+tx).
+
+        This method evaluates in batch the Hessian of the Lagrangian to the
+        concatenation of (uₖ, xₖ). For the terminal stage Hessian, the first
+        tu rows and tu columns are ignored.
+
+        Aguments:
+            scale: weighting for the objective
+            u: shape (K-1, nu)
+            x: shape (K, nx)
+            lam_dyn: shape (K-1, tx)
+            lam_eq: shape (K, ng), teminal stage padded if ng_terminal < ng.
+            lam_ineq: shape (K, ng_ineq), teminal stage padded if ng_ineq_terminal < ng_ineq.
+            lam_initial: shape (tx,)
         """
 
     @abstractmethod
     def batched_eval_Gt(self, u: Array, x: Array) -> Array:
-        """Return ordinary transposed equality Jacobians, shape (K, m, ng)."""
+        """Evaluate the transposed equality constraints Jacobian, shape (K, tu+tx, ng).
+
+        This method evaluates in batch the Jacobian of the ordinary equality
+        constraints with respect to the concatenation of (uₖ, xₖ). Initial
+        constraints are supplied separately by eval_Gt_initial(). For the
+        terminal stage, the first tu rows and columns beyond ng_terminal are
+        ignored.
+
+        Arguments:
+            u: shape (K-1, nu)
+            x: shape (K, nx)
+        """
 
     @abstractmethod
     def batched_eval_Gt_ineq(self, u: Array, x: Array) -> Array:
-        """Return transposed inequality Jacobians, shape (K, m, ng_ineq)."""
+        """Evaluate the transposed inequality constraints Jacobian, shape (K, tu+tx, ng_ineq).
+
+        This method evaluates in batch the Jacobian of the inequality functions
+        with respect to the concatenation of (uₖ, xₖ). For the terminal stage,
+        the first tu rows and columns beyond ng_ineq_terminal are ignored.
+
+        Arguments:
+            u: shape (K-1, nu)
+            x: shape (K, nx)
+        """
 
     @abstractmethod
     def batched_eval_b(self, x_next: Array, u: Array, x: Array) -> Array:
-        """Return dynamics residuals, shape (K-1, tx)."""
+        """Evaluate the dynamics constraint violation, shape (K-1, tx).
+
+        This method evaluates in batch bₖ = -xₖ₊₁ + fₖ(uₖ, xₖ) for Euclidean
+        states. For manifold states, express the residual in tangent coordinates.
+        This callback is not invoked when K=1.
+
+        Arguments:
+            x_next: shape (K-1, nx)
+            u: shape (K-1, nu)
+            x: shape (K-1, nx)
+        """
 
     @abstractmethod
     def batched_eval_g(self, u: Array, x: Array) -> Array:
-        """Return ordinary equality residuals, shape (K, ng)."""
+        """Evaluate the equality constraint violation, shape (K, ng).
+
+        This method evaluates in batch the ordinary equality functions.
+        Initial constraints are supplied separately by eval_g_initial().
+        For the terminal stage, entries beyond ng_terminal are ignored.
+
+        Arguments:
+            u: shape (K-1, nu)
+            x: shape (K, nx)
+        """
 
     @abstractmethod
     def batched_eval_gineq(self, u: Array, x: Array) -> Array:
-        """Return inequality values, shape (K, ng_ineq)."""
+        """Evaluate the inequality functions, shape (K, ng_ineq).
+
+        This method evaluates in batch the inequality functions. For the
+        terminal stage, entries beyond ng_ineq_terminal are ignored.
+
+        Arguments:
+            u: shape (K-1, nu)
+            x: shape (K, nx)
+        """
 
     @abstractmethod
     def batched_eval_rq(self, scale: float, u: Array, x: Array) -> Array:
-        """Return scaled objective gradients, shape (K, m)."""
+        """Evaluate the scaled gradient of the objective function, shape (K, tu+tx).
+
+        This method evaluates in batch the gradient of the objective function
+        with respect to the concatenation of (uₖ, xₖ). For the terminal stage,
+        the first tu entries are ignored.
+
+        Arguments:
+            scale: weighting for the objective
+            u: shape (K-1, nu)
+            x: shape (K, nx)
+        """
 
     @abstractmethod
     def batched_eval_L(self, scale: float, u: Array, x: Array) -> Array:
-        """Return scaled stage objectives, shape (K,)."""
+        """Evaluate the scaled objective function values, shape (K,).
+
+        This method evaluates in batch the stage costs, including the terminal
+        state cost. The total objective is the sum of these values.
+
+        Arguments:
+            scale: weighting for the objective
+            u: shape (K-1, nu)
+            x: shape (K, nx)
+        """
 
     @abstractmethod
     def batched_get_bounds(self) -> tuple[Array, Array]:
-        """Return lower and upper bounds, each shape (K, ng_ineq)."""
+        """Get the inequality bounds, a 2-tuple of arrays with shape (K, ng_ineq).
+
+        Return the lower and upper bounds for batched_eval_gineq(), in that
+        order. For the terminal stage, entries beyond ng_ineq_terminal are
+        ignored.
+        """
 
     @abstractmethod
     def batched_get_initial_xk(self) -> Array:
-        """Return initial state guesses, shape (K, nx)."""
+        """Get the initial guess for the states, shape (K, nx)."""
 
     @abstractmethod
     def batched_get_initial_uk(self) -> Array:
-        """Return initial control guesses, shape (K, nu)."""
+        """Get the initial guess for the inputs, shape (K-1, nu)."""
 
     def batched_apply_retraction_xk(self, x: Array, delta_x: Array, alpha: float) -> Array:
-        """Retract (K, nx) states along (K, tx) steps; defaults to addition."""
+        """Retract the states along tangent steps, returning shape (K, nx).
+
+        Arguments:
+            x: shape (K, nx)
+            delta_x: shape (K, tx)
+            alpha: scalar step length
+        """
         return _euclidean_retraction(x, delta_x, alpha)
 
     def batched_apply_retraction_uk(self, u: Array, delta_u: Array, alpha: float) -> Array:
-        """Retract (K, nu) controls along (K, tu) steps; defaults to addition."""
+        """Retract the inputs along tangent steps, returning shape (K-1, nu).
+
+        Arguments:
+            u: shape (K-1, nu)
+            delta_u: shape (K-1, tu)
+            alpha: scalar step length
+        """
         return _euclidean_retraction(u, delta_u, alpha)
 
     @abstractmethod
     def eval_Gt_initial(self, x0: Array) -> Array:
-        """Return the transposed initial state-tangent Jacobian, shape (tx, tx)."""
+        """Evaluate the transposed initial constraint Jacobian, shape (tx, tx).
+
+        This method evaluates the Jacobian of eval_g_initial() with respect to
+        the initial state's tangent coordinates. Zero input rows are supplied
+        internally, and these columns are appended after stage-0 ordinary
+        equality columns. Include initial constraint curvature in stage 0 of
+        batched_eval_RSQt(), weighted by lam_initial.
+
+        Arguments:
+            x0: shape (nx,)
+        """
 
     @abstractmethod
     def eval_g_initial(self, x0: Array) -> Array:
-        """Return the initial equality residual, shape (tx,)."""
+        """Evaluate the initial equality constraint violation, shape (tx,).
+
+        This method evaluates the initial state residual, which must be zero at
+        a feasible trajectory. These entries are appended after stage-0 ordinary
+        equalities and are excluded from get_ng().
+
+        Arguments:
+            x0: shape (nx,)
+        """
 
     def intermediate(self, iteration: int, x: Array, u: Array,
                      stats: dict[str, float]) -> None:
-        """Observe the current iterate before the next solver step; default no-op.
+        """Observe the current iterate before the next solver step."""
 
-        Iteration numbers start at zero. x and u use the same stacked formats
-        as Result.x and Result.u: (K, nx) and (K-1, nu). Both are immutable,
-        owned snapshots that may be retained after this call or the solve.
 
-        stats is a fresh dictionary containing Fatrop's iteration diagnostics:
-        objective, inf_pr (constraint violation infinity norm), inf_du (maximum
-        variable/slack dual infeasibility infinity norm), and mu (barrier
-        parameter). These are the quantities used by the native iteration log.
-
-        No final callback is added after termination; a solve that performs no
-        iterations makes no calls. Return values are ignored, so returning False
-        does not stop the solve. Exceptions propagate out of Solver.solve().
-        The callback is cached at solver construction, like numerical callbacks.
-        """
+def _euclidean_retraction(value: Array, delta: Array, alpha: float) -> Array:
+    if value.shape[-1] != delta.shape[-1]:
+        raise ValueError("A custom retraction is required when primal and tangent dimensions differ")
+    return value + alpha * delta

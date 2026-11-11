@@ -235,76 +235,61 @@ class _TrajOptAbstractProblem(_Problem):
                 value = value[:count]
             elif name == "get_bounds":
                 value = value[:, :self.dimensions["ng_ineq"][-1]]
-            elif name in ("get_initial_uk", "apply_retraction_uk"):
-                value = value[:0]
         return self._checked_output(name, k, value)
 
-    def _pad_args(self, name, k, args):
-        if k != self.K - 1:
-            return args
-        args = list(args)
-        n = self.nominal
-        sizes = {}
-        if name in ("eval_BAt", "eval_b", "eval_RSQt", "eval_rq", "eval_L"):
-            sizes[1] = n["nu"]
-        elif name in ("eval_Gt", "eval_Gt_ineq", "eval_g", "eval_gineq"):
-            sizes[0] = n["nu"]
-        elif name == "apply_retraction_uk":
-            sizes = {0: n["nu"], 1: n["nu_tangent"]}
-        if name == "eval_RSQt":
-            sizes.update({3: n["nx_tangent"], 4: n["ng"], 5: n["ng_ineq"]})
-        for position, length in sizes.items():
-            padded = np.zeros(length)
-            padded[:len(args[position])] = args[position]
-            args[position] = _readonly(padded)
-        return tuple(args)
+    def _batch_blocks(self, vector, offsets, sizes, width):
+        batch = np.zeros((len(offsets), width))
+        for k, (offset, size) in enumerate(zip(offsets, sizes)):
+            batch[k, :size] = self._block(vector, offset, size)
+        return _readonly(batch)
 
-    def _stage_args(self, name, k, primal, lam, scale, delta, alpha):
-        d = self.dimensions
-
+    def _batch_args(self, name, primal, lam, scale, delta, alpha):
         if name.startswith("get_"):
             return ()
-        u = self._block(primal, self.u_offsets[k], d["nu"][k])
-        x = self._block(primal, self.x_offsets[k], d["nx"][k])
+        d, n = self.dimensions, self.nominal
+        if name == "apply_retraction_uk":
+            u = self._batch_blocks(primal, self.u_offsets[:-1], d["nu"][:-1], n["nu"])
+            du = self._batch_blocks(delta, self.du_offsets[:-1], d["nu_tangent"][:-1],
+                                    n["nu_tangent"])
+            return u, du, alpha
+        x = self._batch_blocks(primal, self.x_offsets, d["nx"], n["nx"])
+        if name == "apply_retraction_xk":
+            dx = self._batch_blocks(delta, self.dx_offsets, d["nx_tangent"], n["nx_tangent"])
+            return x, dx, alpha
+        u = self._batch_blocks(primal, self.u_offsets[:-1], d["nu"][:-1], n["nu"])
         if name in ("eval_BAt", "eval_b"):
-            return self._block(primal, self.x_offsets[k + 1], d["nx"][k + 1]), u, x
+            return x[1:], u, x[:-1]
         if name == "eval_RSQt":
-            ld = (self._block(lam, self.dyn_offsets[k], d["nx_tangent"][k + 1])
-                  if k < self.K - 1 else _readonly(np.empty(0)))
-            return (scale, u, x, ld,
-                    self._block(lam, self.eq_offsets[k], self.path_ng[k]),
-                    self._block(lam, self.ineq_offsets[k], d["ng_ineq"][k]))
+            ld = self._batch_blocks(lam, self.dyn_offsets,
+                                    d["nx_tangent"][1:], n["nx_tangent"])
+            le = self._batch_blocks(lam, self.eq_offsets, self.path_ng, n["ng"])
+            li = self._batch_blocks(lam, self.ineq_offsets, d["ng_ineq"], n["ng_ineq"])
+            offset = self.eq_offsets[0] + self.path_ng[0]
+            initial = _readonly(lam[offset:offset + n["nx_tangent"]].copy())
+            return scale, u, x, ld, le, li, initial
         if name in ("eval_rq", "eval_L"):
             return scale, u, x
-        if name == "apply_retraction_xk":
-            return x, self._block(delta, self.dx_offsets[k], d["nx_tangent"][k]), alpha
-        if name == "apply_retraction_uk":
-            return u, self._block(delta, self.du_offsets[k], d["nu_tangent"][k]), alpha
         return u, x
 
     def _prepare(self, names, primal, lam, scale, delta, alpha):
         """One invocation per native horizon operation; no per-stage Python dispatch."""
         result = {}
         for name in names:
-            count = self.K - 1 if name in ("eval_BAt", "eval_b") else self.K
-            if not count:
+            dynamics = name in ("eval_BAt", "eval_b")
+            controls = name in ("get_initial_uk", "apply_retraction_uk")
+            count = self.K - 1 if dynamics or controls else self.K
+            if dynamics and not count:
                 continue
-            rows = [self._pad_args(name, k, self._stage_args(
-                name, k, primal, lam, scale, delta, alpha
-            )) for k in range(count)]
-            args = []
-            for column in zip(*rows):
-                args.append(_readonly(np.stack(column)) if isinstance(column[0], np.ndarray)
-                            else column[0])
-            if name == "eval_RSQt":
-                offset = self.eq_offsets[0] + self.path_ng[0]
-                args.append(lam[offset:offset + self.nominal["nx_tangent"]])
+            args = self._batch_args(name, primal, lam, scale, delta, alpha)
             value = self.batched[name](*args)
             shape = (count,) + self._shape(name)
             value = self._normalize(name, value, shape, f"batched_{name} for {count} stages")
             result[name] = tuple(self._crop(
                 name, k, tuple(v[k] for v in value) if name == "get_bounds" else value[k]
             ) for k in range(count))
+            if controls:
+                # Native horizon dispatch still requests an empty terminal stage.
+                result[name] = (*result[name], np.empty(0))
             if name in ("eval_g", "eval_Gt"):
                 initial_name = name + "_initial"
                 x0 = primal[self.x_offsets[0]:self.x_offsets[0] + self.nominal["nx"]]

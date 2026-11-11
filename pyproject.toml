@@ -22,7 +22,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7", "build"]
+test = ["build"]
 
 [tool.scikit-build]
 cmake.version = ">=3.19"
@@ -30,11 +30,8 @@ wheel.packages = ["src/cyfatrop"]
 sdist.include = [
   "/pyproject.toml", "/CMakeLists.txt", "/README.md",
   "/cpp/*.cpp", "/src/cyfatrop/*.py",
-  "/src/cyfatrop/*.pyi", "/src/cyfatrop/py.typed", "/tests/*.py", "/examples/*.py",
+  "/src/cyfatrop/*.pyi", "/src/cyfatrop/py.typed", "/examples/*.py",
   "/.github/workflows/test.yml", "/.gitignore",
 ]
 sdist.exclude = ["*"]
 build.tool-args = ["-j2"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

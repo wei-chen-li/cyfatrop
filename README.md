@@ -54,6 +54,6 @@ Run it with `python examples/lqr.py`.
 
 ```sh
 pip install '.[test]'
-python -m pytest
+python src/cyfatrop/_solver_tests.py
 python -m build
 ```
